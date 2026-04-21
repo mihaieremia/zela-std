@@ -43,6 +43,6 @@ world zela-procedure {
 
 	use types.{json, rpc-error};
 
-	/// Run the method, called once per incoming request.
+	// Run the method, called once per incoming request.
 	export run: func(params: json) -> result<json, rpc-error>;
 }

@@ -1,23 +1,27 @@
-#![allow(clippy::collapsible_if)]
+// `result_large_err` / `large_enum_variant`: upstream `RpcError` is big; boxing
+// breaks pattern matching on `ErrorKind::RpcError(...)` downstream.
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+#![allow(clippy::result_large_err, clippy::large_enum_variant)]
 #![allow(mismatched_lifetime_syntaxes)]
 
 mod client;
-mod config;
 mod error;
-mod filter;
 mod pubsub;
-pub mod request;
-pub mod response;
 mod util;
 
+pub use solana_rpc_client_types::config::*;
+pub use solana_rpc_client_types::filter::*;
+pub use solana_rpc_client_types::request::{RpcError as ClientRpcError, RpcRequest};
+pub use solana_rpc_client_types::response::*;
+pub use solana_rpc_client_types::{config, filter, request, response};
+
+use solana_rpc_client_types::request::*;
+
 pub use client::*;
-pub use config::*;
 pub use error::{Error as ClientError, ErrorKind as ClientErrorKind, Result as ClientResult};
+pub use futures_util::{Stream, StreamExt};
 pub use pubsub::{PubsubClient, PubsubClientError};
-pub use request::{RpcRequest, RpcError as ClientRpcError};
-use request::*;
-use response::*;
 use util::*;
 
-// we return a struct implementing Stream from PubsubClient
-pub use futures_util::{Stream, StreamExt};
+/// `Result` whose success carries a `Response<T>` (context + value).
+pub type RpcResult<T> = ClientResult<Response<T>>;

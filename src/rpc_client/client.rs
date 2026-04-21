@@ -12,28 +12,74 @@ use solana_account_decoder_client_types::{
 	UiAccount, UiAccountData, UiAccountEncoding,
 	token::{TokenAccountType, UiTokenAccount, UiTokenAmount},
 };
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
 	account::Account,
 	bs58,
 	clock::{DEFAULT_MS_PER_SLOT, Epoch, Slot, UnixTimestamp},
-	commitment_config::CommitmentConfig,
 	epoch_info::EpochInfo,
 	epoch_schedule::EpochSchedule,
 	hash::Hash,
 	pubkey::Pubkey,
 	signature::Signature,
-	vote::state::MAX_LOCKOUT_HISTORY,
+	transaction::Result as TransactionResult,
 };
-use solana_transaction_error::TransactionResult;
 use solana_transaction_status_client_types::{
 	EncodedConfirmedBlock, EncodedConfirmedTransactionWithStatusMeta, TransactionStatus,
 	UiConfirmedBlock, UiTransactionEncoding,
 };
 
+// Mirrors `solana_vote_interface::state::MAX_LOCKOUT_HISTORY`.
+const MAX_LOCKOUT_HISTORY: usize = 31;
+
 use super::*;
 
+// Blocks the executor thread. `async` is kept for upstream API parity; replace
+// with a cooperative host sleep when the WIT exposes one.
 async fn sleep(dur: Duration) {
 	std::thread::sleep(dur);
+}
+
+// `foo() / foo_with_commitment(c)` pair.
+macro_rules! trio_commitment {
+	($name:ident, $name_with_c:ident, $req:ident -> $ret:ty) => {
+		pub async fn $name(&self) -> $ret {
+			self.$name_with_c(self.commitment()).await
+		}
+		pub async fn $name_with_c(&self, commitment_config: CommitmentConfig) -> $ret {
+			self.send(RpcRequest::$req, json!([commitment_config]))
+				.await
+		}
+	};
+}
+
+// Nullary send.
+macro_rules! nullary {
+	($name:ident, $req:ident -> $ret:ty) => {
+		pub async fn $name(&self) -> $ret {
+			self.send(RpcRequest::$req, Value::Null).await
+		}
+	};
+}
+
+// `foo(pk) / foo_with_commitment(pk, c).value` pair.
+macro_rules! trio_pubkey_value {
+	($name:ident, $name_with_c:ident, $req:ident -> $ret:ty) => {
+		pub async fn $name(&self, pubkey: &Pubkey) -> ClientResult<$ret> {
+			Ok(self.$name_with_c(pubkey, self.commitment()).await?.value)
+		}
+		pub async fn $name_with_c(
+			&self,
+			pubkey: &Pubkey,
+			commitment_config: CommitmentConfig,
+		) -> RpcResult<$ret> {
+			self.send(
+				RpcRequest::$req,
+				json!([pubkey.to_string(), commitment_config]),
+			)
+			.await
+		}
+	};
 }
 
 #[derive(Default)]
@@ -73,11 +119,6 @@ impl RpcClient {
 		Self { config }
 	}
 
-	#[deprecated(since = "2.0.2", note = "RpcClient::node_version is no longer used")]
-	pub async fn set_node_version(&self, _version: semver::Version) -> Result<(), ()> {
-		Ok(())
-	}
-
 	pub fn commitment(&self) -> CommitmentConfig {
 		self.config.commitment_config
 	}
@@ -87,7 +128,7 @@ impl RpcClient {
 		transaction: &impl SerializableTransaction,
 	) -> ClientResult<Signature> {
 		const SEND_RETRIES: usize = 1;
-		const GET_STATUS_RETRIES: usize = usize::MAX;
+		const GET_STATUS_RETRIES: usize = 120; // 60s at 500ms/poll; POLL_BUDGET is the hard backstop
 
 		'sending: for _ in 0..SEND_RETRIES {
 			let signature = self.send_transaction(transaction).await?;
@@ -269,10 +310,7 @@ impl RpcClient {
 		.await
 	}
 
-	pub async fn get_highest_snapshot_slot(&self) -> ClientResult<RpcSnapshotSlotInfo> {
-		self.send(RpcRequest::GetHighestSnapshotSlot, Value::Null)
-			.await
-	}
+	nullary!(get_highest_snapshot_slot, GetHighestSnapshotSlot -> ClientResult<RpcSnapshotSlotInfo>);
 
 	pub async fn get_signature_status(
 		&self,
@@ -342,30 +380,8 @@ impl RpcClient {
 			.map(|status_meta| status_meta.status))
 	}
 
-	pub async fn get_slot(&self) -> ClientResult<Slot> {
-		self.get_slot_with_commitment(self.commitment()).await
-	}
-
-	pub async fn get_slot_with_commitment(
-		&self,
-		commitment_config: CommitmentConfig,
-	) -> ClientResult<Slot> {
-		self.send(RpcRequest::GetSlot, json!([commitment_config]))
-			.await
-	}
-
-	pub async fn get_block_height(&self) -> ClientResult<u64> {
-		self.get_block_height_with_commitment(self.commitment())
-			.await
-	}
-
-	pub async fn get_block_height_with_commitment(
-		&self,
-		commitment_config: CommitmentConfig,
-	) -> ClientResult<u64> {
-		self.send(RpcRequest::GetBlockHeight, json!([commitment_config]))
-			.await
-	}
+	trio_commitment!(get_slot, get_slot_with_commitment, GetSlot -> ClientResult<Slot>);
+	trio_commitment!(get_block_height, get_block_height_with_commitment, GetBlockHeight -> ClientResult<u64>);
 
 	pub async fn get_slot_leaders(
 		&self,
@@ -387,9 +403,7 @@ impl RpcClient {
 			})
 	}
 
-	pub async fn get_block_production(&self) -> RpcResult<RpcBlockProduction> {
-		self.send(RpcRequest::GetBlockProduction, Value::Null).await
-	}
+	nullary!(get_block_production, GetBlockProduction -> RpcResult<RpcBlockProduction>);
 
 	pub async fn get_block_production_with_config(
 		&self,
@@ -399,17 +413,7 @@ impl RpcClient {
 			.await
 	}
 
-	pub async fn supply(&self) -> RpcResult<RpcSupply> {
-		self.supply_with_commitment(self.commitment()).await
-	}
-
-	pub async fn supply_with_commitment(
-		&self,
-		commitment_config: CommitmentConfig,
-	) -> RpcResult<RpcSupply> {
-		self.send(RpcRequest::GetSupply, json!([commitment_config]))
-			.await
-	}
+	trio_commitment!(supply, supply_with_commitment, GetSupply -> RpcResult<RpcSupply>);
 
 	pub async fn get_largest_accounts_with_config(
 		&self,
@@ -516,9 +520,7 @@ impl RpcClient {
 		Ok(())
 	}
 
-	pub async fn get_cluster_nodes(&self) -> ClientResult<Vec<RpcContactInfo>> {
-		self.send(RpcRequest::GetClusterNodes, Value::Null).await
-	}
+	nullary!(get_cluster_nodes, GetClusterNodes -> ClientResult<Vec<RpcContactInfo>>);
 
 	pub async fn get_block(&self, slot: Slot) -> ClientResult<EncodedConfirmedBlock> {
 		self.get_block_with_encoding(slot, UiTransactionEncoding::Json)
@@ -662,17 +664,7 @@ impl RpcClient {
 			.map_err(|err| err.into_with_request(request))?
 	}
 
-	pub async fn get_epoch_info(&self) -> ClientResult<EpochInfo> {
-		self.get_epoch_info_with_commitment(self.commitment()).await
-	}
-
-	pub async fn get_epoch_info_with_commitment(
-		&self,
-		commitment_config: CommitmentConfig,
-	) -> ClientResult<EpochInfo> {
-		self.send(RpcRequest::GetEpochInfo, json!([commitment_config]))
-			.await
-	}
+	trio_commitment!(get_epoch_info, get_epoch_info_with_commitment, GetEpochInfo -> ClientResult<EpochInfo>);
 
 	pub async fn get_leader_schedule(
 		&self,
@@ -706,9 +698,7 @@ impl RpcClient {
 			.await
 	}
 
-	pub async fn get_epoch_schedule(&self) -> ClientResult<EpochSchedule> {
-		self.send(RpcRequest::GetEpochSchedule, Value::Null).await
-	}
+	nullary!(get_epoch_schedule, GetEpochSchedule -> ClientResult<EpochSchedule>);
 
 	pub async fn get_recent_performance_samples(
 		&self,
@@ -741,14 +731,8 @@ impl RpcClient {
 		})
 	}
 
-	pub async fn get_inflation_governor(&self) -> ClientResult<RpcInflationGovernor> {
-		self.send(RpcRequest::GetInflationGovernor, Value::Null)
-			.await
-	}
-
-	pub async fn get_inflation_rate(&self) -> ClientResult<RpcInflationRate> {
-		self.send(RpcRequest::GetInflationRate, Value::Null).await
-	}
+	nullary!(get_inflation_governor, GetInflationGovernor -> ClientResult<RpcInflationGovernor>);
+	nullary!(get_inflation_rate, GetInflationRate -> ClientResult<RpcInflationRate>);
 
 	pub async fn get_inflation_reward(
 		&self,
@@ -773,13 +757,8 @@ impl RpcClient {
 		.await
 	}
 
-	pub async fn get_version(&self) -> ClientResult<RpcVersionInfo> {
-		self.send(RpcRequest::GetVersion, Value::Null).await
-	}
-
-	pub async fn minimum_ledger_slot(&self) -> ClientResult<Slot> {
-		self.send(RpcRequest::MinimumLedgerSlot, Value::Null).await
-	}
+	nullary!(get_version, GetVersion -> ClientResult<RpcVersionInfo>);
+	nullary!(minimum_ledger_slot, MinimumLedgerSlot -> ClientResult<Slot>);
 
 	pub async fn get_account(&self, pubkey: &Pubkey) -> ClientResult<Account> {
 		self.get_account_with_commitment(pubkey, self.commitment())
@@ -841,15 +820,8 @@ impl RpcClient {
 			})?
 	}
 
-	pub async fn get_max_retransmit_slot(&self) -> ClientResult<Slot> {
-		self.send(RpcRequest::GetMaxRetransmitSlot, Value::Null)
-			.await
-	}
-
-	pub async fn get_max_shred_insert_slot(&self) -> ClientResult<Slot> {
-		self.send(RpcRequest::GetMaxShredInsertSlot, Value::Null)
-			.await
-	}
+	nullary!(get_max_retransmit_slot, GetMaxRetransmitSlot -> ClientResult<Slot>);
+	nullary!(get_max_shred_insert_slot, GetMaxShredInsertSlot -> ClientResult<Slot>);
 
 	pub async fn get_multiple_accounts(
 		&self,
@@ -925,24 +897,7 @@ impl RpcClient {
 		Ok(minimum_balance)
 	}
 
-	pub async fn get_balance(&self, pubkey: &Pubkey) -> ClientResult<u64> {
-		Ok(self
-			.get_balance_with_commitment(pubkey, self.commitment())
-			.await?
-			.value)
-	}
-
-	pub async fn get_balance_with_commitment(
-		&self,
-		pubkey: &Pubkey,
-		commitment_config: CommitmentConfig,
-	) -> RpcResult<u64> {
-		self.send(
-			RpcRequest::GetBalance,
-			json!([pubkey.to_string(), commitment_config]),
-		)
-		.await
-	}
+	trio_pubkey_value!(get_balance, get_balance_with_commitment, GetBalance -> u64);
 
 	pub async fn get_program_accounts(
 		&self,
@@ -1000,23 +955,9 @@ impl RpcClient {
 			.value)
 	}
 
-	pub async fn get_transaction_count(&self) -> ClientResult<u64> {
-		self.get_transaction_count_with_commitment(self.commitment())
-			.await
-	}
+	trio_commitment!(get_transaction_count, get_transaction_count_with_commitment, GetTransactionCount -> ClientResult<u64>);
 
-	pub async fn get_transaction_count_with_commitment(
-		&self,
-		commitment_config: CommitmentConfig,
-	) -> ClientResult<u64> {
-		self.send(RpcRequest::GetTransactionCount, json!([commitment_config]))
-			.await
-	}
-
-	pub async fn get_first_available_block(&self) -> ClientResult<Slot> {
-		self.send(RpcRequest::GetFirstAvailableBlock, Value::Null)
-			.await
-	}
+	nullary!(get_first_available_block, GetFirstAvailableBlock -> ClientResult<Slot>);
 
 	pub async fn get_genesis_hash(&self) -> ClientResult<Hash> {
 		let hash_str: String = self.send(RpcRequest::GetGenesisHash, Value::Null).await?;
@@ -1098,24 +1039,7 @@ impl RpcClient {
 			})?
 	}
 
-	pub async fn get_token_account_balance(&self, pubkey: &Pubkey) -> ClientResult<UiTokenAmount> {
-		Ok(self
-			.get_token_account_balance_with_commitment(pubkey, self.commitment())
-			.await?
-			.value)
-	}
-
-	pub async fn get_token_account_balance_with_commitment(
-		&self,
-		pubkey: &Pubkey,
-		commitment_config: CommitmentConfig,
-	) -> RpcResult<UiTokenAmount> {
-		self.send(
-			RpcRequest::GetTokenAccountBalance,
-			json!([pubkey.to_string(), commitment_config]),
-		)
-		.await
-	}
+	trio_pubkey_value!(get_token_account_balance, get_token_account_balance_with_commitment, GetTokenAccountBalance -> UiTokenAmount);
 
 	pub async fn get_token_accounts_by_delegate(
 		&self,
@@ -1201,46 +1125,9 @@ impl RpcClient {
 		.await
 	}
 
-	pub async fn get_token_largest_accounts(
-		&self,
-		mint: &Pubkey,
-	) -> ClientResult<Vec<RpcTokenAccountBalance>> {
-		Ok(self
-			.get_token_largest_accounts_with_commitment(mint, self.commitment())
-			.await?
-			.value)
-	}
+	trio_pubkey_value!(get_token_largest_accounts, get_token_largest_accounts_with_commitment, GetTokenLargestAccounts -> Vec<RpcTokenAccountBalance>);
 
-	pub async fn get_token_largest_accounts_with_commitment(
-		&self,
-		mint: &Pubkey,
-		commitment_config: CommitmentConfig,
-	) -> RpcResult<Vec<RpcTokenAccountBalance>> {
-		self.send(
-			RpcRequest::GetTokenLargestAccounts,
-			json!([mint.to_string(), commitment_config]),
-		)
-		.await
-	}
-
-	pub async fn get_token_supply(&self, mint: &Pubkey) -> ClientResult<UiTokenAmount> {
-		Ok(self
-			.get_token_supply_with_commitment(mint, self.commitment())
-			.await?
-			.value)
-	}
-
-	pub async fn get_token_supply_with_commitment(
-		&self,
-		mint: &Pubkey,
-		commitment_config: CommitmentConfig,
-	) -> RpcResult<UiTokenAmount> {
-		self.send(
-			RpcRequest::GetTokenSupply,
-			json!([mint.to_string(), commitment_config]),
-		)
-		.await
-	}
+	trio_pubkey_value!(get_token_supply, get_token_supply_with_commitment, GetTokenSupply -> UiTokenAmount);
 
 	pub async fn request_airdrop(&self, pubkey: &Pubkey, lamports: u64) -> ClientResult<Signature> {
 		self.request_airdrop_with_config(
@@ -1565,27 +1452,23 @@ impl RpcClient {
 		request: RpcRequest,
 		params: Value,
 	) -> ClientResult<T> {
-		assert!(params.is_object() || params.is_array() || params.is_null());
+		debug_assert!(params.is_object() || params.is_array() || params.is_null());
 
 		let method = format!("{request}");
 		match crate::call_rpc::<Value, T, Value>(&method, params) {
 			Ok(Ok(v)) => Ok(v),
-			Ok(Err(err)) => {
-				Err(ClientError {
-					request: Some(request),
-					kind: ClientErrorKind::RpcError(RpcError::RpcResponseError {
-						code: err.code.into(),
-						message: err.message,
-						data: RpcResponseErrorData::Empty,
-					}),
-				})
-			}
-			Err(err) => {
-				Err(ClientError {
-					request: Some(request),
-					kind: ClientErrorKind::Custom(format!("RPC call failed: {err}")),
-				})
-			}
+			Ok(Err(err)) => Err(ClientError {
+				request: Some(request),
+				kind: ClientErrorKind::RpcError(RpcError::RpcResponseError {
+					code: err.code.into(),
+					message: err.message,
+					data: RpcResponseErrorData::Empty,
+				}),
+			}),
+			Err(err) => Err(ClientError {
+				request: Some(request),
+				kind: ClientErrorKind::Custom(format!("RPC call failed: {err}")),
+			}),
 		}
 	}
 }

@@ -1,6 +1,7 @@
-use zela_std::{CustomProcedure, JsonValue, RpcError};
+use zela_std::*;
 
 pub struct EchoProcedure;
+
 impl CustomProcedure for EchoProcedure {
 	type Params = JsonValue;
 	type SuccessData = JsonValue;
@@ -10,4 +11,5 @@ impl CustomProcedure for EchoProcedure {
 		Ok(params)
 	}
 }
-zela_std::zela_custom_procedure!(EchoProcedure);
+
+zela_custom_procedure!(EchoProcedure);

@@ -1,22 +1,27 @@
 use serde::Serialize;
 
-use solana_message::{Message as LegacyMessage, v0};
-use solana_sdk::{commitment_config::CommitmentConfig, hash::Hash, signature::Signature};
-use solana_transaction::{Transaction, uses_durable_nonce, versioned::VersionedTransaction};
+use solana_commitment_config::CommitmentConfig;
+use solana_sdk::{
+	hash::Hash,
+	message::{Message as LegacyMessage, v0},
+	signature::Signature,
+	transaction::{Transaction, VersionedTransaction, uses_durable_nonce},
+};
 
 /// Trait used to add support for versioned messages to RPC APIs while
-/// retaining backwards compatibility
+/// retaining backwards compatibility.
 pub trait SerializableMessage: Serialize {}
 impl SerializableMessage for LegacyMessage {}
 impl SerializableMessage for v0::Message {}
 
 /// Trait used to add support for versioned transactions to RPC APIs while
-/// retaining backwards compatibility
+/// retaining backwards compatibility.
 pub trait SerializableTransaction: Serialize {
 	fn get_signature(&self) -> &Signature;
 	fn get_recent_blockhash(&self) -> &Hash;
 	fn uses_durable_nonce(&self) -> bool;
 }
+
 impl SerializableTransaction for Transaction {
 	fn get_signature(&self) -> &Signature {
 		&self.signatures[0]
@@ -28,6 +33,7 @@ impl SerializableTransaction for Transaction {
 		uses_durable_nonce(self).is_some()
 	}
 }
+
 impl SerializableTransaction for VersionedTransaction {
 	fn get_signature(&self) -> &Signature {
 		&self.signatures[0]
