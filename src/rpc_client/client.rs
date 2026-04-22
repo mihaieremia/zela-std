@@ -1476,46 +1476,64 @@ impl RpcClient {
 	}
 }
 
-// Codes mirror `solana_rpc_client::custom_error`. Duplicated here because that
-// module lives in the HTTP-using `solana-rpc-client` crate which we deliberately
-// don't depend on (we tunnel through the host's `call-rpc` import instead).
-const JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE: i64 = -32002;
-const JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY: i64 = -32005;
+// Decodes the `data` payload of a JSON-RPC error response into the structured
+// `RpcResponseErrorData` variants. Gated behind the `tx-debug` feature because
+// deserializing `RpcSimulateTransactionResult` pulls ~50-95 KB of type-tree
+// code into the binary, which is dead weight for read-only procedures. Without
+// the feature, every error gets `Empty` and `Error::get_transaction_error`
+// returns `None` — same behavior as before this fix existed, but now it's an
+// explicit opt-out instead of a silent bug.
 
-#[derive(serde::Deserialize)]
-struct NodeUnhealthyErrorData {
-	#[serde(rename = "numSlotsBehind")]
-	num_slots_behind: Option<solana_sdk::clock::Slot>,
+#[cfg(feature = "tx-debug")]
+mod tx_debug {
+	use super::{RpcResponseErrorData, RpcSimulateTransactionResult, Value, debug};
+
+	// Codes mirror `solana_rpc_client::custom_error`. Duplicated here because
+	// that module lives in the HTTP-using `solana-rpc-client` crate which we
+	// deliberately don't depend on (we tunnel through the host's `call-rpc`
+	// import instead).
+	const JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE: i64 = -32002;
+	const JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY: i64 = -32005;
+
+	#[derive(serde::Deserialize)]
+	struct NodeUnhealthyErrorData {
+		#[serde(rename = "numSlotsBehind")]
+		num_slots_behind: Option<solana_sdk::clock::Slot>,
+	}
+
+	pub(super) fn decode_response_error_data(code: i64, data: Option<&Value>) -> RpcResponseErrorData {
+		let Some(data) = data else { return RpcResponseErrorData::Empty };
+		match code {
+			JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE => {
+				match serde_json::from_value::<RpcSimulateTransactionResult>(data.clone()) {
+					Ok(r) => RpcResponseErrorData::SendTransactionPreflightFailure(r),
+					Err(err) => {
+						debug!("failed to decode preflight failure data: {err}");
+						RpcResponseErrorData::Empty
+					}
+				}
+			}
+			JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY => {
+				match serde_json::from_value::<NodeUnhealthyErrorData>(data.clone()) {
+					Ok(NodeUnhealthyErrorData { num_slots_behind }) => {
+						RpcResponseErrorData::NodeUnhealthy { num_slots_behind }
+					}
+					Err(_) => RpcResponseErrorData::Empty,
+				}
+			}
+			_ => RpcResponseErrorData::Empty,
+		}
+	}
 }
 
-/// Map a JSON-RPC error code + raw `data` payload onto the structured
-/// [`RpcResponseErrorData`] variant the upstream client uses, so callers can
-/// pattern-match on `SendTransactionPreflightFailure` / `NodeUnhealthy`. The
-/// previous implementation always returned `Empty`, which made
-/// `Error::get_transaction_error` and the simulation-log dump in
-/// `send_transaction_with_config` (lines ~216-230) silently dead code.
+#[cfg(feature = "tx-debug")]
 fn decode_response_error_data(code: i64, data: Option<&Value>) -> RpcResponseErrorData {
-	let Some(data) = data else { return RpcResponseErrorData::Empty };
-	match code {
-		JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE => {
-			match serde_json::from_value::<RpcSimulateTransactionResult>(data.clone()) {
-				Ok(r) => RpcResponseErrorData::SendTransactionPreflightFailure(r),
-				Err(err) => {
-					debug!("failed to decode preflight failure data: {err}");
-					RpcResponseErrorData::Empty
-				}
-			}
-		}
-		JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY => {
-			match serde_json::from_value::<NodeUnhealthyErrorData>(data.clone()) {
-				Ok(NodeUnhealthyErrorData { num_slots_behind }) => {
-					RpcResponseErrorData::NodeUnhealthy { num_slots_behind }
-				}
-				Err(_) => RpcResponseErrorData::Empty,
-			}
-		}
-		_ => RpcResponseErrorData::Empty,
-	}
+	tx_debug::decode_response_error_data(code, data)
+}
+
+#[cfg(not(feature = "tx-debug"))]
+fn decode_response_error_data(_code: i64, _data: Option<&Value>) -> RpcResponseErrorData {
+	RpcResponseErrorData::Empty
 }
 
 fn serialize_and_encode<T>(input: &T, encoding: UiTransactionEncoding) -> ClientResult<String>

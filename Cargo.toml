@@ -24,6 +24,18 @@ solana = [
 	"dep:solana-transaction-status-client-types",
 	"dep:solana-rpc-client-types",
 ]
+# Preserve the `data` payload of structured JSON-RPC errors:
+#   -32002 -> RpcResponseErrorData::SendTransactionPreflightFailure(simulation_logs)
+#   -32005 -> RpcResponseErrorData::NodeUnhealthy { num_slots_behind }
+# Off by default: deserializing `RpcSimulateTransactionResult` drags ~50-95 KB
+# of type-tree code into every wasm that uses `RpcClient` (proportional to how
+# much of the RPC surface the procedure touches). Read-only procedures don't
+# care — the `Empty` variant is a fine fallback. Procedures that submit
+# transactions and want preflight logs in their error path enable this:
+#
+#   [dependencies]
+#   zela-std = { ..., features = ["tx-debug"] }
+tx-debug = ["solana"]
 
 [dependencies]
 wit-bindgen = { version = "0.57", default-features = false, features = ["macros"] }
