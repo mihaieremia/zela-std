@@ -1077,7 +1077,7 @@ impl RpcClient {
 		};
 
 		self.send(
-			RpcRequest::GetTokenAccountsByOwner,
+			RpcRequest::GetTokenAccountsByDelegate,
 			json!([delegate.to_string(), token_account_filter, config]),
 		)
 		.await
