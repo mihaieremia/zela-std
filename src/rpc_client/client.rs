@@ -1457,19 +1457,64 @@ impl RpcClient {
 		let method = format!("{request}");
 		match crate::call_rpc::<Value, T, Value>(&method, params) {
 			Ok(Ok(v)) => Ok(v),
-			Ok(Err(err)) => Err(ClientError {
-				request: Some(request),
-				kind: ClientErrorKind::RpcError(RpcError::RpcResponseError {
-					code: err.code.into(),
-					message: err.message,
-					data: RpcResponseErrorData::Empty,
-				}),
-			}),
+			Ok(Err(err)) => {
+				let data = decode_response_error_data(err.code.into(), err.data.as_ref());
+				Err(ClientError {
+					request: Some(request),
+					kind: ClientErrorKind::RpcError(RpcError::RpcResponseError {
+						code: err.code.into(),
+						message: err.message,
+						data,
+					}),
+				})
+			}
 			Err(err) => Err(ClientError {
 				request: Some(request),
-				kind: ClientErrorKind::Custom(format!("RPC call failed: {err}")),
+				kind: ClientErrorKind::Io(err),
 			}),
 		}
+	}
+}
+
+// Codes mirror `solana_rpc_client::custom_error`. Duplicated here because that
+// module lives in the HTTP-using `solana-rpc-client` crate which we deliberately
+// don't depend on (we tunnel through the host's `call-rpc` import instead).
+const JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE: i64 = -32002;
+const JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY: i64 = -32005;
+
+#[derive(serde::Deserialize)]
+struct NodeUnhealthyErrorData {
+	#[serde(rename = "numSlotsBehind")]
+	num_slots_behind: Option<solana_sdk::clock::Slot>,
+}
+
+/// Map a JSON-RPC error code + raw `data` payload onto the structured
+/// [`RpcResponseErrorData`] variant the upstream client uses, so callers can
+/// pattern-match on `SendTransactionPreflightFailure` / `NodeUnhealthy`. The
+/// previous implementation always returned `Empty`, which made
+/// `Error::get_transaction_error` and the simulation-log dump in
+/// `send_transaction_with_config` (lines ~216-230) silently dead code.
+fn decode_response_error_data(code: i64, data: Option<&Value>) -> RpcResponseErrorData {
+	let Some(data) = data else { return RpcResponseErrorData::Empty };
+	match code {
+		JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE => {
+			match serde_json::from_value::<RpcSimulateTransactionResult>(data.clone()) {
+				Ok(r) => RpcResponseErrorData::SendTransactionPreflightFailure(r),
+				Err(err) => {
+					debug!("failed to decode preflight failure data: {err}");
+					RpcResponseErrorData::Empty
+				}
+			}
+		}
+		JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY => {
+			match serde_json::from_value::<NodeUnhealthyErrorData>(data.clone()) {
+				Ok(NodeUnhealthyErrorData { num_slots_behind }) => {
+					RpcResponseErrorData::NodeUnhealthy { num_slots_behind }
+				}
+				Err(_) => RpcResponseErrorData::Empty,
+			}
+		}
+		_ => RpcResponseErrorData::Empty,
 	}
 }
 
